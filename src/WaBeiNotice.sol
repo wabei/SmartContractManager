@@ -10,18 +10,51 @@ pragma solidity ^0.4.18;
 *	5 Dapp和官网动态抓取审核通过的公告，并做相应的展示
 *	
 */
+library SafeMath {
+    function sub(uint a, uint b) internal pure returns (uint) {
+        assert(b <= a);
+        return a - b;
+    }
+
+    function add(uint a, uint b) internal pure returns (uint) {
+        uint c = a + b;
+        assert(c >= a);
+        return c;
+    }
+
+    function mul(uint a, uint b) internal pure returns (uint) {
+        uint c = a * b;
+        assert(a == 0 || c / a == b);
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        
+        assert(b!=0);
+        
+        uint256 c = a / b;
+        return c;
+    }
+}
+
 contract WaBeiNotice {
+    
+    using SafeMath for uint;
 
 	address owner;
 
 	address checker;
 
-	address costRecver;
+	address costReciver;
 
 	mapping (address => mapping (uint => Notice)) noticePool;
 
 	mapping (address => uint[]) noticeIds;
-		
+
+	mapping (uint => NoticePublish) publishNotices;
+	
+	uint currentIndex;
+
 	modifier onlyOwner() { 
         require(msg.sender == owner);
         _;
@@ -35,13 +68,15 @@ contract WaBeiNotice {
     enum state{ prePublish, publish, checked, checkFail, expired, closed}
 
     struct NoticePublish{
-    	address _who;
+    	bool valid;
+    	address who;
     	uint noticeId;
 
     }
 
 	struct Notice{
 
+		uint index;
 		// dynamic gen(needn't)
 		uint noticeId;
 		// notice ipfs hash
@@ -50,13 +85,16 @@ contract WaBeiNotice {
 		string noticeContent;
 		// notice Title 
 		string noticeTitle;
+        bool isRegisted;
+        
+        uint expired;
 
 		/** notice state 
 		*	10001 : prePublish
 		*	10002 : publish
 		*	10003 : checked
 		*/	
-		uint noticeState;
+		state noticeState;
 
 		// 合约状态相应的一些描述
 		string msg;
@@ -64,6 +102,18 @@ contract WaBeiNotice {
 		// 公告所有人发布公告的地址
 		address who;
 	}
+	
+	event LogPublishNotice(uint indexed index,  address _who, uint _id);
+	
+	constructor(address _checker, address _costReciver) public {
+	    owner = msg.sender;
+	    
+	    require(msg.sender != _checker && msg.sender != _costReciver);
+	    
+	    costReciver = _costReciver;
+	    checker = _checker;
+	}
+	
 
 	/**
 	*	publish notice with notice owner
@@ -71,55 +121,49 @@ contract WaBeiNotice {
 	**/
 	function prePublish(string _title , string _pic, string _content, uint _expired) external returns(uint _id){
 		
-		Notice storage notice = new Notice();
-
+        Notice storage notice = noticePool[msg.sender][now];
+		notice.isRegisted = true;
 		notice.who = msg.sender;
-		notice.noticeId = block.timestamp;
+		notice.noticeId = now;
 		notice.pic = _pic;
 		notice.noticeTitle = _title;
 		notice.noticeContent = _content;
 		notice.msg = 'prePublish';
 		notice.noticeState = state.prePublish;
-		notice._expired = block.timestamp + _expired;
-		// save notice for address
-		noticePool[address][notice.noticeId] = notice;
+		notice.expired = now + _expired;
+
 		// save noticeId with address
-		noticeIds[address].push(notice.noticeId);
+		noticeIds[msg.sender].push(notice.noticeId);
 
 		return notice.noticeId;
 	}
 
-	function doPublish(uint _value, uint _id) external  returns(bool _res, string _msg){
+	function doPublish(uint _value, uint _id) payable public returns(bool _res, string _msg){
 		
 		Notice storage notice = noticePool[msg.sender][_id];
-
-		bool isExist = (bool)(notice); 
-		if (!isExist) {
-			return (false, 'notice is not exist');
-		}
+    
+        require(notice.isRegisted);
 
 		// check from Balances 
-		bool balanceCheck = (balance(msg.sender) > _value);
+		bool balanceCheck = (msg.sender.balance > _value);
 		if (!balanceCheck) {
 			return (false , 'publisher balance is not enough');
 		}
 
 
 		// check from address is legal 
-		bool accountCheck = (msg.sender != costRecver);
+		bool accountCheck = (msg.sender != costReciver);
 		if (!accountCheck) {
 			return (false, 'msg.sender must not costRecver');
 		}
 
 		// check the value is legal
-		bool valueCheck = ((balance(costRecver) += _value)>balancesOf(costRecver));
+		bool valueCheck = ((costReciver.balance.add(_value)) > costReciver.balance);
 		if (!valueCheck) {
 			return (false, 'value is not legal');
 		}
 
-		balances(msg.sender) -= _value;
-
-		balances(costRecver) += _value;
+		costReciver.transfer(_value);
 
 		notice.noticeState = state.publish;
 
@@ -132,13 +176,12 @@ contract WaBeiNotice {
 		Notice storage notice = noticePool[_who][_id];
 		
 		// check notice is exist
-		bool isExist = bool(notice); 
-		if (!isExist) {
-			return (false, 'notice is not exist');
+		if(!notice.isRegisted) {
+		    return (false, 'notice is not exist');
 		}
 
 		// check notice state is publish 
-		bool isPublished = notice.state == state.publish;
+		bool isPublished = (notice.noticeState == state.publish);
 		if (!isPublished) {
 			return (false, 'notice is not puhlish ');
 		}
@@ -150,6 +193,15 @@ contract WaBeiNotice {
 			notice.noticeState = state.checkFail;
 			notice.msg = _checkMsg;
 		}
+
+		uint index = currentIndex++;
+
+		notice.index = index;
+
+		publishNotices[index].valid = true;
+		publishNotices[index].who = notice.who;
+		publishNotices[index].noticeId = notice.noticeId;
+
 		return (true, 'checked finish');
 	}
 
@@ -158,20 +210,35 @@ contract WaBeiNotice {
 		Notice storage notice = noticePool[_who][_id];
 		
 		// check notice is exist
-		bool isExist = (bool)(notice); 
-		if (!isExist) {
-			return (false, 'notice is not exist');
+		if (notice.isRegisted) {
+		    return (false, 'notice is not exist');
 		}
 
-		bool isClose = notice.state == state.closed;
+		bool isClose = notice.noticeState == state.closed;
 		if (isClose) {
 			return (false, 'notice has closed');
 		}
 
-		notice.state = state.closed;
+		notice.noticeState = state.closed;
 		notice.msg = 'admin closed, contact ours';
 
 		return (true, 'notice close success');
+	}
+
+    function getCurrnetNoticeIndex() public view returns(uint _currentindex) {
+        return currentIndex;
+    }
+
+	function getNoticeList() public {
+		for (uint i=0; i < currentIndex; i++ ){
+			if(publishNotices[i].valid) {
+				emit LogPublishNotice(i, publishNotices[i].who, publishNotices[i].noticeId);
+			}
+		}
+	}
+
+	function getPublicState(address _who, uint _id) public view returns(string _title, string _pic, state s, uint expired,uint publishIndex) {
+		return (noticePool[_who][_id].noticeTitle,  noticePool[_who][_id].pic, noticePool[_who][_id].noticeState, noticePool[_who][_id].expired, noticePool[_who][_id].index);
 	}
 
 
